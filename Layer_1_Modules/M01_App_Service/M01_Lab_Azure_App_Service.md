@@ -80,7 +80,7 @@ az webapp create \
   --name $APP_NAME \                  # ← Globally unique app name
   --resource-group az204-appservice-rg \
   --plan az204-appservice-plan \      # ← The S1 plan from Step 2
-  --runtime "DOTNETCORE:8.0"         # ← .NET 8 runtime
+  --runtime "DOTNETCORE|8.0"         # ← .NET 8 runtime (Linux uses | separator)
 ```
 
 **Expected output:** A JSON object with `"state": "Running"`.
