@@ -629,6 +629,159 @@ az webapp config access-restriction add \
 
 ---
 
+## Section 9: Managed Identity — The Application's Identity
+
+### 🔴 Exam Relevance: HIGH
+
+### The Problem: How Does Your App Prove Who It Is?
+
+Let us think carefully about what your deployed App Service actually needs to do in the real world. It needs to:
+
+- Read secrets from **Azure Key Vault** (your database passwords, API keys)
+- Access blobs in **Azure Blob Storage**
+- Write logs to a **Storage Account**
+- Call the **Azure OpenAI API** on behalf of your company
+
+Every single one of these actions requires your *application* to prove its identity to another Azure service. The question is: **how?**
+
+The old, dangerous way: hardcode a username and password (or API key) into your `appsettings.json` file. This works but creates massive security problems — secrets stored in source code, rotation is a nightmare, and any compromise of the app means total compromise of every downstream service.
+
+### The Analogy: A Corporate Staff Badge
+
+In a large office building, employees carry a **staff badge**. They don't need to type a password every time they enter a secure room — they just badge in. The building's security system knows who they are because the badge is issued by the company's HR system and is cryptographically tied to that specific employee.
+
+When an employee leaves the company, HR deactivates the badge. No other systems need to change.
+
+**Managed Identity** is the staff badge for your Azure application. Azure issues a cryptographic identity to your App Service, and other Azure services can verify that identity automatically — no passwords, no credentials stored in code.
+
+### What Is a Managed Identity?
+
+A **Managed Identity** (MI) is an identity in Microsoft Entra ID that Azure creates, manages, and rotates automatically on behalf of your resource. It works like a service account, but you never manage the password — Azure does.
+
+💡 **KEY CONCEPT**
+> A Managed Identity gives your App Service an Entra ID identity. Other Azure services use RBAC to grant permissions to that identity. Your code authenticates using `DefaultAzureCredential` — no passwords, no connection strings, no secrets in code.
+
+### System-Assigned vs User-Assigned Managed Identity
+
+There are two types. The distinction is tested on the AZ-204 exam:
+
+| Feature | System-Assigned MI | User-Assigned MI |
+|---|---|---|
+| **Created by** | Azure, automatically, when you enable it on a resource | You create it manually as a standalone Azure resource |
+| **Tied to** | One specific resource (e.g., one App Service) | Can be assigned to *multiple* resources |
+| **Lifecycle** | Deleted when the resource is deleted | Independent — you manage when it is deleted |
+| **Best for** | Single-resource access — simplest setup | Shared identity across multiple apps or services |
+| **Analogy** | Badge printed for one specific employee | A master passcard that multiple contractors can use |
+
+🚨 **EXAM ALERT**
+> **System-Assigned MI** is tied to one resource — deleting the App Service automatically deletes its identity. **User-Assigned MI** is a standalone resource that can be shared across multiple services and has an independent lifecycle. The exam will describe a scenario and ask which type to use.
+>
+> Scenario: "Multiple Azure Functions and one App Service all need to read from the same Key Vault" → Use **User-Assigned MI** (one identity, assigned to all three resources).
+>
+> Scenario: "One App Service needs to read from a Key Vault and nothing else" → Use **System-Assigned MI** (simpler, automatic lifecycle).
+
+### The Zero-Trust Pattern: How It Works End-to-End
+
+Here is the complete flow of how a Managed Identity replaces a password when your App Service reads a secret from Key Vault:
+
+```
+1. You enable System-Assigned MI on your App Service
+2. Azure creates an identity in Entra ID for this specific App Service
+3. You grant that identity the "Key Vault Secrets User" role on your Key Vault (via RBAC)
+4. Your app code uses DefaultAzureCredential to authenticate:
+   - In Cloud Shell / local dev: uses your `az login` credentials
+   - In App Service: uses the Managed Identity automatically
+5. Your code calls Key Vault to get the secret value
+6. Key Vault checks: "Does this identity have the Secrets User role?" → YES → returns the secret
+7. Your code receives the secret value at runtime — it was never stored in any config file
+```
+
+The critical point: **your code never sees, stores, or handles a credential**. The identity is managed entirely by Azure.
+
+### Enabling Managed Identity via CLI
+
+```bash
+# Enable a System-Assigned Managed Identity on your App Service
+az webapp identity assign \
+  --name $APP_NAME \                # ← Your App Service name
+  --resource-group az204-appservice-rg
+```
+
+This command returns the **Principal ID** — the unique identifier for this App Service's identity in Entra ID. **Save this value** — you need it to grant RBAC roles.
+
+```json
+{
+  "principalId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",  ← Save this
+  "tenantId": "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy",
+  "type": "SystemAssigned"
+}
+```
+
+### Granting the Identity Permission to Key Vault
+
+```bash
+# Save the Principal ID from the output above
+PRINCIPAL_ID=$(az webapp identity show \
+  --name $APP_NAME \
+  --resource-group az204-appservice-rg \
+  --query principalId \
+  --output tsv)
+
+# Get your Key Vault resource ID
+KV_ID=$(az keyvault show \
+  --name $YOUR_KEYVAULT_NAME \
+  --query id \
+  --output tsv)
+
+# Grant the App Service identity the "Secrets User" role
+az role assignment create \
+  --assignee $PRINCIPAL_ID \         # ← The identity we just created
+  --role "Key Vault Secrets User" \  # ← Read-only access to secrets
+  --scope $KV_ID                     # ← Scope it to this specific vault only
+```
+
+| Flag | What It Does |
+|---|---|
+| `--assignee` | The Principal ID of the Managed Identity |
+| `--role` | The RBAC role to assign. `Key Vault Secrets User` allows reading secrets but NOT creating or deleting them |
+| `--scope` | Limits where this role applies. Scoping to the vault (not the subscription) follows least-privilege |
+
+### Reading the Code Side: DefaultAzureCredential
+
+In your .NET application, you use the `DefaultAzureCredential` class from the Azure Identity SDK. This one class handles authentication for *both* local development and cloud deployment automatically:
+
+```csharp
+using Azure.Identity;
+using Azure.Security.KeyVault.Secrets;
+
+// DefaultAzureCredential tries multiple authentication methods in order:
+// 1. Environment variables (CI/CD pipelines)
+// 2. Managed Identity (when running in App Service, Functions, AKS)
+// 3. Visual Studio credentials (local development)
+// 4. Azure CLI credentials (az login — your Cloud Shell session)
+// 5. ... and more fallbacks
+var credential = new DefaultAzureCredential();
+
+var client = new SecretClient(
+    new Uri("https://your-vault.vault.azure.net/"),
+    credential   // ← No password, no API key. Just the identity.
+);
+
+KeyVaultSecret secret = await client.GetSecretAsync("MyOpenAIKey");
+string apiKey = secret.Value;
+```
+
+💡 **KEY CONCEPT**
+> `DefaultAzureCredential` is the recommended way to authenticate to Azure services in application code. It automatically uses Managed Identity when running in Azure, and your developer credentials when running locally. **You write the same code for both environments** — no environment-specific credential handling.
+
+👀 **UI Check:**
+In the Azure Portal, after enabling Managed Identity:
+1. Go to your App Service → Left menu → **Identity**
+2. Under the **System assigned** tab, you will see **Status: On** and the **Object (principal) ID**
+3. This is the identity that needs the RBAC role on Key Vault
+
+---
+
 ## Module Connections
 
 🔗 **MODULE LINK**
@@ -670,12 +823,17 @@ Use this checklist to verify you understand every key concept from this module:
 - [ ] **HTTPS Only** — redirects HTTP to HTTPS
 - [ ] **Minimum TLS 1.2** — standard security hardening
 - [ ] **App Settings** — key-value pairs injected as environment variables, override local config files
-- [ ] **Easy Auth** — built-in authentication at App Service level, no code changes needed
+- [ ] **Easy Auth** — built-in authentication at App Service level, no code changes needed (User Identity)
 - [ ] **Easy Auth providers** — Entra ID, Facebook, Google, Twitter, GitHub, OpenID Connect
 - [ ] **Token store** — automatic encrypted cache of authentication tokens
 - [ ] **VNet Integration** — OUTBOUND ONLY, connects app to private Azure VNet resources
 - [ ] **Hybrid Connections** — connects app to on-premises resources via TCP tunnel
 - [ ] **Access Restrictions** — inbound IP firewall to control who can reach the app
+- [ ] **Managed Identity (App Identity)** — gives the App Service an Entra ID identity without passwords
+- [ ] **System-Assigned MI** — tied to one resource, deleted with the resource, simplest setup
+- [ ] **User-Assigned MI** — standalone resource, assignable to multiple services, independent lifecycle
+- [ ] **RBAC + MI** — grant the identity a role (e.g., `Key Vault Secrets User`) at a specific scope
+- [ ] **DefaultAzureCredential** — authenticates with MI in Azure, developer credentials locally. Same code, both environments
 
 ---
 

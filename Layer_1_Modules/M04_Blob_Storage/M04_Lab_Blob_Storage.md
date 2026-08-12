@@ -1,15 +1,21 @@
-# M04 — Lab Guide: Azure Blob Storage
+# M04 — Lab Guide: Azure Blob Storage (Enterprise Edition)
 
 ---
 
 | | |
 |---|---|
 | **Module** | M04 — Azure Blob Storage |
-| **Lab Title** | Upload, Manage, and Secure Blobs with SDK, SAS, Lifecycle, and Static Sites |
-| **Prerequisites** | F01–F08, M01–M03, .NET SDK installed, Azure CLI |
-| **Estimated Time** | 75 minutes |
-| **What You Will Build** | A .NET console app that uploads/downloads/lists blobs, plus a static website hosted in Blob Storage |
-| **What You Will Learn** | ✅ SDK operations · ✅ Metadata · ✅ SAS tokens · ✅ Lifecycle policy · ✅ Static website hosting |
+| **Lab Title** | Upload, Secure, and Govern Blobs with User Delegation SAS, RBAC, and Immutability |
+| **Prerequisites** | F01–F08, active Azure subscription, Azure Cloud Shell (Bash) |
+| **Estimated Time** | 90 minutes |
+| **What You Will Build** | A governed blob storage environment with RBAC access, enterprise-grade User Delegation SAS tokens, lifecycle policies, and a compliance immutability lock |
+| **What You Will Learn** | ✅ Create Storage Account · ✅ Assign RBAC roles · ✅ Generate User Delegation SAS · ✅ Apply lifecycle policies · ✅ Apply Legal Hold · ✅ Host static website |
+| **Tool** | Azure Cloud Shell (Bash) |
+
+---
+
+> ⚠️ **IMPORTANT: Use Azure Cloud Shell for the entire lab.**
+> Open [portal.azure.com](https://portal.azure.com) → Click the `>_` icon → Select **Bash**.
 
 ---
 
@@ -17,269 +23,315 @@
 >
 > - **GPv2 Storage Account (LRS):** ~$0.018/GB/month for Hot tier
 > - **Data operations:** ~$0.004 per 10,000 read operations
-> - **Estimated total cost for this lab: under $0.01**
+> - **Estimated total cost for this lab: under $0.05**
 >
 > ⚠️ Delete all resources at the end.
 
 ---
 
-## Part 1: Create the Storage Account
+## Part 1: Create the Storage Infrastructure
 
 ### Step 1: Create a Resource Group
 
 ```bash
 az group create \
   --name az204-blob-rg \
-  --location eastus
+  --location eastus \
+  --tags Project=AZ204 Module=M04
 ```
+
+> 👀 **UI Check:** Portal → **Resource Groups** → `az204-blob-rg` appears with your tags.
 
 ### Step 2: Create a Storage Account
 
 ```bash
 STORAGE_NAME=az204blob$RANDOM
+echo "Storage account name: $STORAGE_NAME"   # ← WRITE THIS DOWN
 
 az storage account create \
-  --name $STORAGE_NAME \             # ← Globally unique, lowercase + numbers only
+  --name $STORAGE_NAME \                      # ← Globally unique, 3–24 lowercase chars
   --resource-group az204-blob-rg \
   --location eastus \
-  --sku Standard_LRS \               # ← Standard performance, LRS redundancy (cheapest)
-  --kind StorageV2                   # ← General-purpose v2 (always use this)
+  --sku Standard_LRS \                        # ← Locally Redundant Storage (cheapest for labs)
+  --kind StorageV2 \                          # ← General Purpose v2 (always use this)
+  --allow-blob-public-access false \          # ← Enterprise best practice: disable anonymous access
+  --min-tls-version TLS1_2                    # ← Enforce TLS 1.2 minimum (same as App Service)
 ```
 
-### Step 3: Get the Connection String
+| Flag | Why It Matters |
+|---|---|
+| `--allow-blob-public-access false` | Prevents anonymous users from ever accessing blobs, even if someone sets a container to "Blob" or "Container" access. Enterprise standard. |
+| `--min-tls-version TLS1_2` | Rejects any connection using older, insecure TLS versions. Security hardening. |
+
+> 👀 **UI Check:** Portal → **Storage accounts** → click `$STORAGE_NAME` → **Security + networking** → **Configuration** → verify "Allow Blob public access" is **Disabled** and "Minimum TLS version" is **TLS 1.2**.
+
+### Step 3: Create Blob Containers
 
 ```bash
-CONNECTION_STRING=$(az storage account show-connection-string \
-  --name $STORAGE_NAME \
-  --resource-group az204-blob-rg \
-  --output tsv)
+# documents container — general file uploads
+az storage container create \
+  --account-name $STORAGE_NAME \
+  --name documents \
+  --auth-mode login                           # ← Use your Entra ID identity (not the account key)
 
-echo "Connection string saved to variable"
+# compliance-records container — will receive an immutability policy later
+az storage container create \
+  --account-name $STORAGE_NAME \
+  --name compliance-records \
+  --auth-mode login
 ```
+
+> 📝 **NOTE:** We use `--auth-mode login` throughout this lab instead of `--auth-mode key`. This instructs the CLI to use your logged-in Entra ID identity rather than the storage account key. This is the enterprise standard — it means you never need to extract or handle the account key directly.
+
+> 👀 **UI Check:** Portal → your Storage account → **Data storage** → **Containers** → both containers appear.
 
 > ✅ **CHECKPOINT 1**
-> - ✅ Resource group created
-> - ✅ Storage account created
-> - ✅ Connection string saved
+>
+> - ✅ Resource group created with tags
+> - ✅ Storage account created with public access disabled and TLS 1.2 enforced
+> - ✅ Two containers created using Entra ID authentication
 
 ---
 
-## Part 2: Create a .NET Console App with Blob SDK
+## Part 2: Upload Real Data
 
-### Step 4: Create the Project
-
-```bash
-mkdir az204-blob-lab && cd az204-blob-lab
-
-dotnet new console --name BlobLab    # ← Create a new .NET console project
-cd BlobLab
-
-dotnet add package Azure.Storage.Blobs   # ← Blob Storage SDK
-```
-
-### Step 5: Write the Blob Operations Code
-
-Replace the contents of `Program.cs` with:
-
-```csharp
-using Azure.Storage.Blobs;                 // ← Main Blob SDK namespace
-using Azure.Storage.Blobs.Models;          // ← Model classes (BlobItem, BlobProperties)
-
-// --- CONFIGURATION ---
-// In production, use DefaultAzureCredential. For this lab, using connection string.
-string connectionString = Environment.GetEnvironmentVariable("AZURE_STORAGE_CONNECTION")
-    ?? throw new InvalidOperationException("Set AZURE_STORAGE_CONNECTION env var");
-
-string containerName = "lab-documents";     // ← Container name
-
-// --- STEP 1: CREATE SERVICE CLIENT ---
-var serviceClient = new BlobServiceClient(connectionString);
-Console.WriteLine($"Connected to: {serviceClient.AccountName}");
-
-// --- STEP 2: CREATE CONTAINER ---
-BlobContainerClient containerClient = serviceClient.GetBlobContainerClient(containerName);
-await containerClient.CreateIfNotExistsAsync(PublicAccessType.None);  // ← Private access
-Console.WriteLine($"Container '{containerName}' ready.");
-
-// --- STEP 3: UPLOAD BLOBS ---
-// Create sample files to upload
-File.WriteAllText("report-q1.txt", "Q1 Financial Report\nRevenue: $1.2M\nProfit: $300K");
-File.WriteAllText("report-q2.txt", "Q2 Financial Report\nRevenue: $1.5M\nProfit: $400K");
-File.WriteAllText("notes.txt", "Meeting notes from project kickoff.");
-
-string[] files = { "report-q1.txt", "report-q2.txt", "notes.txt" };
-
-foreach (string file in files)
-{
-    BlobClient blobClient = containerClient.GetBlobClient($"reports/{file}");
-    await blobClient.UploadAsync(file, overwrite: true);   // ← Upload with overwrite
-    Console.WriteLine($"  Uploaded: reports/{file}");
-}
-
-// --- STEP 4: SET METADATA ---
-BlobClient q1Blob = containerClient.GetBlobClient("reports/report-q1.txt");
-var metadata = new Dictionary<string, string>
-{
-    { "department", "finance" },
-    { "quarter", "Q1" },
-    { "status", "reviewed" }
-};
-await q1Blob.SetMetadataAsync(metadata);
-Console.WriteLine("\nMetadata set on report-q1.txt");
-
-// --- STEP 5: LIST ALL BLOBS ---
-Console.WriteLine($"\nBlobs in '{containerName}':");
-await foreach (BlobItem blob in containerClient.GetBlobsAsync())
-{
-    Console.WriteLine($"  Name: {blob.Name}");
-    Console.WriteLine($"    Size: {blob.Properties.ContentLength} bytes");
-    Console.WriteLine($"    Tier: {blob.Properties.AccessTier}");
-    Console.WriteLine($"    Modified: {blob.Properties.LastModified}");
-}
-
-// --- STEP 6: READ METADATA ---
-BlobProperties properties = await q1Blob.GetPropertiesAsync();
-Console.WriteLine($"\nMetadata for report-q1.txt:");
-foreach (var kvp in properties.Metadata)
-{
-    Console.WriteLine($"  {kvp.Key} = {kvp.Value}");
-}
-
-// --- STEP 7: DOWNLOAD A BLOB ---
-BlobDownloadInfo download = await q1Blob.DownloadAsync();
-using (StreamReader reader = new StreamReader(download.Content))
-{
-    string content = await reader.ReadToEndAsync();
-    Console.WriteLine($"\nDownloaded content:\n{content}");
-}
-
-// --- STEP 8: DELETE A BLOB ---
-BlobClient notesBlob = containerClient.GetBlobClient("reports/notes.txt");
-await notesBlob.DeleteIfExistsAsync();
-Console.WriteLine("\nDeleted: reports/notes.txt");
-
-// Final blob count
-int count = 0;
-await foreach (BlobItem blob in containerClient.GetBlobsAsync()) { count++; }
-Console.WriteLine($"\nRemaining blobs: {count}");
-Console.WriteLine("\n✅ All blob operations complete!");
-```
-
-### Step 6: Run the Application
+### Step 4: Create Test Files and Upload Them
 
 ```bash
-# Set the connection string as an environment variable
-# Linux/Mac:
-export AZURE_STORAGE_CONNECTION="$CONNECTION_STRING"
+# Create realistic test files (simulating a document management system)
+cat > invoice-2024-001.txt << 'EOF'
+INVOICE #2024-001
+Date: 2024-01-15
+Client: AlphaAI Ltd
+Amount: $15,000.00
+Status: PAID
+EOF
 
-# Windows PowerShell:
-$env:AZURE_STORAGE_CONNECTION = $CONNECTION_STRING
+cat > contract-2024-001.txt << 'EOF'
+SERVICE AGREEMENT
+Between: AlphaAI Ltd and CloudProvider Inc
+Start Date: 2024-01-01
+Duration: 12 months
+Value: $180,000/year
+Status: ACTIVE
+EOF
 
-# Run the app
-dotnet run
-```
-
-**Expected output:**
-```
-Connected to: az204blobXXXXX
-Container 'lab-documents' ready.
-  Uploaded: reports/report-q1.txt
-  Uploaded: reports/report-q2.txt
-  Uploaded: reports/notes.txt
-
-Metadata set on report-q1.txt
-
-Blobs in 'lab-documents':
-  Name: reports/notes.txt
-    Size: 44 bytes
-    Tier: Hot
-  Name: reports/report-q1.txt
-    Size: 54 bytes
-    Tier: Hot
-  Name: reports/report-q2.txt
-    Size: 54 bytes
-    Tier: Hot
-
-Metadata for report-q1.txt:
-  department = finance
-  quarter = Q1
-  status = reviewed
-
-Downloaded content:
-Q1 Financial Report
+cat > report-q1-2024.txt << 'EOF'
+Q1 2024 FINANCIAL REPORT
 Revenue: $1.2M
-Profit: $300K
+Operating Costs: $800K
+Net Profit: $400K
+Status: AUDITED AND APPROVED
+EOF
 
-Deleted: reports/notes.txt
+# Upload files to the documents container using Entra ID auth
+az storage blob upload \
+  --account-name $STORAGE_NAME \
+  --container-name documents \
+  --name "invoices/invoice-2024-001.txt" \
+  --file invoice-2024-001.txt \
+  --auth-mode login
 
-Remaining blobs: 2
+az storage blob upload \
+  --account-name $STORAGE_NAME \
+  --container-name compliance-records \
+  --name "contracts/contract-2024-001.txt" \
+  --file contract-2024-001.txt \
+  --auth-mode login
 
-✅ All blob operations complete!
+az storage blob upload \
+  --account-name $STORAGE_NAME \
+  --container-name compliance-records \
+  --name "reports/report-q1-2024.txt" \
+  --file report-q1-2024.txt \
+  --auth-mode login
+
+echo "Files uploaded successfully"
 ```
+
+### Step 5: Verify Uploads
+
+```bash
+# List blobs in the documents container
+az storage blob list \
+  --account-name $STORAGE_NAME \
+  --container-name documents \
+  --output table \
+  --auth-mode login
+
+# List blobs in the compliance-records container
+az storage blob list \
+  --account-name $STORAGE_NAME \
+  --container-name compliance-records \
+  --output table \
+  --auth-mode login
+```
+
+> 👀 **UI Check:** Portal → Storage account → **Containers** → click `documents` → you'll see the `invoices/` virtual folder. Click into it to see the blob.
 
 > ✅ **CHECKPOINT 2**
-> - ✅ .NET project created with Azure.Storage.Blobs package
-> - ✅ Container created programmatically
-> - ✅ 3 blobs uploaded
-> - ✅ Metadata set and read
-> - ✅ Blob listed, downloaded, and deleted
+>
+> - ✅ Three test files created
+> - ✅ Files uploaded to correct containers using `--auth-mode login`
+> - ✅ Upload verified via CLI and portal
 
 ---
 
-## Part 3: Generate a SAS Token via CLI
+## Part 3: RBAC — Grant Secure Access Without Keys
 
-### Step 7: Generate a SAS Token
+### Step 6: Understand Why We Use RBAC Instead of Keys
+
+> 💡 **KEY CONCEPT: The Problem with Storage Account Keys**
+>
+> Every storage account has two **Account Keys**. These keys are like a master key to the entire building — anyone with a key has full read/write/delete access to EVERY container and EVERY blob, forever, with no audit trail of who did what.
+>
+> In enterprise environments, you never hand out storage account keys. Instead, you use **RBAC roles** scoped to the minimum level necessary.
+
+### Step 7: Assign Your Own Identity the Storage Blob Data Contributor Role
+
+In this step, you assign your own logged-in identity a role on the storage account. This is required to generate a User Delegation SAS in the next part.
 
 ```bash
-# Generate a SAS token for the container (valid for 1 hour, read-only)
-END_DATE=$(date -u -d "+1 hour" '+%Y-%m-%dT%H:%MZ')  # ← 1 hour from now
+# Get your own account's identity (object ID)
+USER_ID=$(az ad signed-in-user show --query id --output tsv)
+echo "Your user Object ID: $USER_ID"
 
-SAS_TOKEN=$(az storage container generate-sas \
-  --account-name $STORAGE_NAME \
-  --name lab-documents \             # ← Container name
-  --permissions r \                  # ← Read-only permission
-  --expiry $END_DATE \               # ← Token expires in 1 hour
-  --auth-mode key \                  # ← Sign with storage account key
+# Get the storage account resource ID
+STORAGE_ID=$(az storage account show \
+  --name $STORAGE_NAME \
+  --resource-group az204-blob-rg \
+  --query id \
   --output tsv)
 
-echo "SAS Token: $SAS_TOKEN"
+# Assign yourself the Storage Blob Data Contributor role
+az role assignment create \
+  --assignee $USER_ID \
+  --role "Storage Blob Data Contributor" \
+  --scope $STORAGE_ID
 ```
 
-### Step 8: Access a Blob Using the SAS URL
+| Flag | What It Does |
+|---|---|
+| `--assignee` | The identity receiving the role (your own account here) |
+| `--role "Storage Blob Data Contributor"` | Grants read, write, and delete on blobs. NOT admin rights. |
+| `--scope $STORAGE_ID` | Scopes the role to this specific storage account only |
+
+> 📝 **NOTE:** RBAC role assignments can take **1–5 minutes** to propagate through Azure's identity system. If the next steps fail with a permission error, wait 2 minutes and try again.
+
+> 👀 **UI Check:** Portal → Storage account → **Access control (IAM)** → **Role assignments** tab → filter by your email → you'll see your "Storage Blob Data Contributor" assignment listed.
+
+> ✅ **CHECKPOINT 3**
+>
+> - ✅ RBAC role assigned without touching account keys
+> - ✅ Assignment visible in the portal IAM blade
+
+---
+
+## Part 4: User Delegation SAS — The Enterprise-Grade Secure Token
+
+### Step 8: Why User Delegation SAS Instead of Service or Account SAS?
+
+The existing lab used `--auth-mode key` to generate a SAS token. **This is the wrong approach for production.** Here is why:
+
+| | Account/Service SAS | User Delegation SAS |
+|---|---|---|
+| **Signed with** | Storage account key | Microsoft Entra ID credentials |
+| **Revocation** | Must rotate the storage key (breaks ALL apps using that key) | Revoke via Entra ID — scoped, precise |
+| **Audit trail** | None | Full Entra ID audit log |
+| **RBAC required** | No | Yes — generating identity must have `Storage Blob Data Contributor` or higher |
+| **Enterprise use** | ❌ Not recommended | ✅ Recommended |
+
+> 🚨 **EXAM ALERT:** The User Delegation SAS requires the generating identity to have the `Storage Blob Data Delegator` or `Storage Blob Data Contributor` RBAC role. Without an RBAC role, you cannot generate a User Delegation SAS. This is by design — it forces you to use proper identity-based access.
+
+### Step 9: Generate a User Delegation SAS Token
+
+```bash
+# Set token expiry to 2 hours from now
+EXPIRY=$(date -u -d "+2 hours" '+%Y-%m-%dT%H:%MZ')
+echo "Token will expire at: $EXPIRY"
+
+# Generate the User Delegation SAS (notice: --auth-mode login, NOT key)
+USER_DELEGATION_SAS=$(az storage blob generate-sas \
+  --account-name $STORAGE_NAME \
+  --container-name documents \
+  --name "invoices/invoice-2024-001.txt" \
+  --permissions r \                           # ← Read-only permission on THIS blob only
+  --expiry $EXPIRY \
+  --auth-mode login \                         # ← Signed with YOUR Entra ID identity (not the key)
+  --as-user \                                 # ← This flag is what makes it a User Delegation SAS
+  --https-only \                              # ← Only allow HTTPS access (never plain HTTP)
+  --output tsv)
+
+echo "User Delegation SAS Token: $USER_DELEGATION_SAS"
+```
+
+**Every flag explained:**
+| Flag | Why It Matters |
+|---|---|
+| `--permissions r` | Read-only. The token cannot be used to write, delete, or list. Least-privilege. |
+| `--auth-mode login` | Signs the SAS with your Entra ID credential, not the storage key |
+| `--as-user` | **Critical flag** — this is what upgrades it from a Service SAS to a User Delegation SAS |
+| `--https-only` | The SAS URL will only work over HTTPS. If someone uses plain HTTP, it fails. |
+
+### Step 10: Prove the Token Works
 
 ```bash
 # Construct the full SAS URL
-BLOB_URL="https://$STORAGE_NAME.blob.core.windows.net/lab-documents/reports/report-q1.txt?$SAS_TOKEN"
+BLOB_URL="https://$STORAGE_NAME.blob.core.windows.net/documents/invoices/invoice-2024-001.txt?$USER_DELEGATION_SAS"
 
-# Access the blob using curl
-curl "$BLOB_URL"
+echo "Testing SAS URL..."
+curl -s "$BLOB_URL"
 ```
 
-**Expected output:** The contents of `report-q1.txt` displayed in your terminal.
+**Expected output:** The contents of your invoice file:
+```
+INVOICE #2024-001
+Date: 2024-01-15
+Client: AlphaAI Ltd
+Amount: $15,000.00
+Status: PAID
+```
 
-> ✅ **CHECKPOINT 3**
-> - ✅ SAS token generated with read-only permissions and 1-hour expiry
-> - ✅ Blob accessed via SAS URL without authentication credentials
+### Step 11: Prove the Token Cannot Write (Least Privilege Verification)
+
+```bash
+# Attempt to delete the blob using the read-only SAS — this MUST fail
+echo "Testing that read-only SAS cannot delete..."
+curl -s -X DELETE "$BLOB_URL"
+```
+
+**Expected output:** An XML error message containing `AuthorizationPermissionMismatch` — the token is read-only and correctly rejects the delete attempt.
+
+This is enterprise security in action: the partner gets a URL that expires, cannot be used to delete data, and is traceable to your identity in the Entra ID audit logs.
+
+> ✅ **CHECKPOINT 4**
+>
+> - ✅ User Delegation SAS generated (signed with Entra ID, not account key)
+> - ✅ SAS URL successfully downloads the file
+> - ✅ SAS URL correctly REJECTS the delete attempt
+> - ✅ No storage account key was used in this entire section
 
 ---
 
-## Part 4: Create a Lifecycle Management Policy
+## Part 5: Lifecycle Management Policy
 
-### Step 9: Create a Lifecycle Policy
+### Step 12: Apply an Automated Tiering Policy
+
+**Why:** In production, financial and compliance documents follow a predictable access pattern — they're accessed frequently right after creation, then rarely. Automating the tiering saves significant cost.
 
 ```bash
-# Create a lifecycle policy JSON file
+# Create the policy JSON
 cat > lifecycle-policy.json << 'EOF'
 {
   "rules": [
     {
-      "name": "move-old-reports-to-cool",
+      "name": "tier-and-delete-old-documents",
       "enabled": true,
       "type": "Lifecycle",
       "definition": {
         "filters": {
           "blobTypes": ["blockBlob"],
-          "prefixMatch": ["reports/"]
+          "prefixMatch": ["invoices/"]
         },
         "actions": {
           "baseBlob": {
@@ -287,10 +339,10 @@ cat > lifecycle-policy.json << 'EOF'
               "daysAfterModificationGreaterThan": 30
             },
             "tierToArchive": {
-              "daysAfterModificationGreaterThan": 180
+              "daysAfterModificationGreaterThan": 90
             },
             "delete": {
-              "daysAfterModificationGreaterThan": 365
+              "daysAfterModificationGreaterThan": 2555
             }
           }
         }
@@ -300,129 +352,191 @@ cat > lifecycle-policy.json << 'EOF'
 }
 EOF
 
-# Apply the policy
+# Apply the policy to the storage account
 az storage account management-policy create \
   --account-name $STORAGE_NAME \
   --resource-group az204-blob-rg \
-  --policy @lifecycle-policy.json    # ← @ prefix reads from file
+  --policy @lifecycle-policy.json
 ```
 
-> 📝 **NOTE:** Lifecycle policies run **once per day**. You won't see immediate tier changes in this lab — the policy is configured for future automated management.
+> 📝 **NOTE:** Lifecycle policies execute **once per day**. You won't see tier changes in this lab — the policy is deployed and will begin managing costs automatically going forward.
 
-> ✅ **CHECKPOINT 4**
-> - ✅ Lifecycle policy JSON created
-> - ✅ Policy applied to storage account
+> 👀 **UI Check:** Portal → Storage account → **Data management** → **Lifecycle management** → your rule `tier-and-delete-old-documents` appears with the three actions (Cool/Archive/Delete) and their day thresholds.
+
+> ✅ **CHECKPOINT 5**
+>
+> - ✅ Lifecycle policy JSON created (Cool at 30 days, Archive at 90, Delete at 2555)
+> - ✅ Policy applied and visible in the portal
 
 ---
 
-## Part 5: Static Website Hosting
+## Part 6: Immutability — Protecting Compliance Data
 
-### Step 10: Enable Static Website
+### Step 13: Apply a Legal Hold to the Compliance Container
+
+**The scenario:** The `compliance-records` container holds financial contracts and Q1 reports. Your legal team has notified you that these documents may be needed for regulatory review. They must not be deleted under any circumstances until further notice.
 
 ```bash
-az storage blob service-properties update \
+# Apply a Legal Hold to the compliance-records container
+az storage container legal-hold set \
   --account-name $STORAGE_NAME \
-  --static-website \                 # ← Enable static website hosting
-  --index-document index.html \      # ← Default page
-  --404-document 404.html            # ← Error page
+  --resource-group az204-blob-rg \
+  --container-name compliance-records \
+  --tags "RegReview2024"            # ← A descriptive tag identifying this hold
 ```
 
-### Step 11: Upload HTML Files
+**Expected output:** `"hasLegalHold": true`
+
+### Step 14: Prove the Legal Hold Prevents Deletion
 
 ```bash
-# Create a simple index page
+# Attempt to delete a protected blob — this MUST fail
+echo "Attempting to delete legally protected blob..."
+az storage blob delete \
+  --account-name $STORAGE_NAME \
+  --container-name compliance-records \
+  --name "contracts/contract-2024-001.txt" \
+  --auth-mode login
+```
+
+**Expected output:** An error containing `BlobImmutableDueToPolicy` or `ContainerHasLegalHold`.
+
+The blob cannot be deleted. Not by you. Not by the subscription administrator. Not by Azure support. The hold must be released first.
+
+> 👀 **UI Check:** Portal → Storage account → **Containers** → click `compliance-records` → Left menu → **Access policy** → scroll to **Legal holds** → you'll see `RegReview2024` listed.
+
+### Step 15: Release the Legal Hold (So We Can Clean Up)
+
+```bash
+# Release the legal hold (simulating: legal team confirmed the case is closed)
+az storage container legal-hold clear \
+  --account-name $STORAGE_NAME \
+  --resource-group az204-blob-rg \
+  --container-name compliance-records \
+  --tags "RegReview2024"
+```
+
+> ✅ **CHECKPOINT 6**
+>
+> - ✅ Legal Hold applied to compliance container
+> - ✅ Blob deletion correctly blocked by the hold
+> - ✅ Legal Hold released (required for cleanup)
+
+---
+
+## Part 7: Static Website Hosting
+
+### Step 16: Enable and Deploy a Static Website
+
+```bash
+# Enable static website hosting
+az storage blob service-properties update \
+  --account-name $STORAGE_NAME \
+  --static-website \
+  --index-document index.html \
+  --404-document 404.html
+
+# Create the index page
 cat > index.html << 'EOF'
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AZ-204 Blob Storage Lab</title>
+    <title>AlphaAI Document Portal</title>
     <style>
-        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #0078d4; color: white; }
-        h1 { font-size: 2.5em; }
-        p { font-size: 1.2em; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #0078d4; color: white; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; flex-direction: column; }
+        h1 { font-size: 2.5em; margin-bottom: 10px; }
+        p { font-size: 1.2em; opacity: 0.9; }
+        .badge { background: rgba(255,255,255,0.2); padding: 8px 20px; border-radius: 20px; margin-top: 20px; }
     </style>
 </head>
 <body>
-    <h1>🎉 Hello from Azure Blob Storage!</h1>
-    <p>This static website is hosted directly from Azure Blob Storage.</p>
-    <p>No web server required — just HTML, CSS, and JavaScript.</p>
+    <h1>📁 AlphaAI Document Portal</h1>
+    <p>Enterprise document storage powered by Azure Blob Storage</p>
+    <div class="badge">🔒 Secured with User Delegation SAS</div>
 </body>
 </html>
 EOF
 
-cat > 404.html << 'EOF'
-<!DOCTYPE html>
-<html><head><title>404</title></head>
-<body><h1>404 — Page Not Found</h1><p>This page doesn't exist.</p></body>
-</html>
-EOF
-
-# Upload to the $web container
-az storage blob upload \
-  --account-name $STORAGE_NAME \
-  --container-name '$web' \          # ← Special static website container
-  --name index.html \
-  --file index.html \
-  --auth-mode key
-
+# Upload to $web container
 az storage blob upload \
   --account-name $STORAGE_NAME \
   --container-name '$web' \
-  --name 404.html \
-  --file 404.html \
-  --auth-mode key
-```
+  --name index.html \
+  --file index.html \
+  --auth-mode login
 
-### Step 12: Access the Static Website
-
-```bash
-# Get the website URL
-az storage account show \
+# Get the static website URL
+WEBSITE_URL=$(az storage account show \
   --name $STORAGE_NAME \
   --resource-group az204-blob-rg \
   --query "primaryEndpoints.web" \
-  --output tsv
+  --output tsv)
+
+echo "Static website live at: $WEBSITE_URL"
 ```
 
-Open the URL in your browser. You should see your "Hello from Azure Blob Storage!" page.
+Open the URL in your browser to see your enterprise document portal.
 
-🎉 **You just hosted a website with zero web servers!**
+> 👀 **UI Check:** Portal → Storage account → **Data management** → **Static website** → you'll see the **Primary endpoint** URL and the index/error document settings.
 
-> ✅ **CHECKPOINT 5**
+> ✅ **CHECKPOINT 7**
+>
 > - ✅ Static website hosting enabled
-> - ✅ HTML files uploaded to `$web` container
+> - ✅ Custom HTML deployed to `$web` container
 > - ✅ Website accessible in browser
 
 ---
 
-## Part 6: Clean Up 🧹
+## Part 8: Clean Up 🧹
 
-> 💰 **COST WARNING:** Storage accounts accrue costs even when idle (for stored data). Delete everything now.
+> 💰 **COST WARNING:** Storage accounts accumulate charges even at rest. Delete everything now.
 
 ```bash
 az group delete \
   --name az204-blob-rg \
-  --yes --no-wait
+  --yes \
+  --no-wait
 ```
 
-Verify after 2 minutes: `az group list --output table`
+Verify after 2 minutes:
+```bash
+az group list --output table
+```
 
 ---
 
-## What We Covered ✅
+## Troubleshooting
 
-- [ ] Created a GPv2 storage account with LRS redundancy
-- [ ] Built a .NET console app with `Azure.Storage.Blobs` SDK
-- [ ] Created a blob container programmatically
-- [ ] Uploaded blobs using `BlobClient.UploadAsync()`
-- [ ] Set and read user metadata on blobs
-- [ ] Listed all blobs in a container with properties
-- [ ] Downloaded blob content with `BlobClient.DownloadAsync()`
-- [ ] Deleted a blob with `BlobClient.DeleteIfExistsAsync()`
-- [ ] Generated a SAS token via CLI with read-only permissions
-- [ ] Accessed a blob via SAS URL
-- [ ] Created a lifecycle management policy (JSON format)
-- [ ] Enabled static website hosting
-- [ ] Uploaded HTML to the `$web` container
-- [ ] Accessed the static website in a browser
-- [ ] Cleaned up all resources
+### Error: `AuthorizationPermissionMismatch` when generating User Delegation SAS
+**Cause:** Your RBAC role has not propagated yet.
+**Fix:** Wait 2–5 minutes after running the `az role assignment create` command. RBAC assignments are not instant.
+
+### Error: `az storage container legal-hold set: error`
+**Cause:** The storage account may need versioning enabled for some immutability features.
+**Fix:** Run `az storage account blob-service-properties update --account-name $STORAGE_NAME --resource-group az204-blob-rg --enable-versioning true` then retry.
+
+### Error: `BlobNotFound` when accessing via SAS URL
+**Cause:** The blob path in the SAS URL doesn't match.
+**Fix:** Ensure the `--name` in the SAS generation command exactly matches the blob's full path including virtual folders (e.g., `invoices/invoice-2024-001.txt`).
+
+### SAS Token works but file is empty
+**Cause:** The file was not created before upload.
+**Fix:** Verify the file exists using `ls -la` before uploading.
+
+---
+
+## What We Built ✅
+
+- [x] GPv2 Storage Account with public access **disabled** and TLS 1.2 enforced (enterprise security defaults)
+- [x] Blob containers created using `--auth-mode login` (no account key exposure)
+- [x] Realistic test files uploaded to simulate a document management system
+- [x] RBAC role (`Storage Blob Data Contributor`) assigned via CLI, not via account keys
+- [x] **User Delegation SAS** generated (signed with Entra ID, `--auth-mode login --as-user`)
+- [x] SAS token proven to work (file download via `curl`)
+- [x] SAS token proven to fail on write operations (least-privilege verified)
+- [x] Lifecycle management policy deployed (Cool at 30d, Archive at 90d, Delete at 2555d)
+- [x] Legal Hold applied to compliance container
+- [x] Blob deletion blocked by Legal Hold (compliance enforced)
+- [x] Legal Hold released for cleanup
+- [x] Static website hosted in `$web` container
+- [x] All resources deleted to prevent ongoing charges

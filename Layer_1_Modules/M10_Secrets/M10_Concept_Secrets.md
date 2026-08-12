@@ -143,10 +143,89 @@ When App Service sees this string, it automatically reaches out to Key Vault, gr
 🚨 **EXAM ALERT**
 > To use Key Vault References, your App Service **MUST** have a System-Assigned Managed Identity enabled, and that identity **MUST** have permission to read the secret in Key Vault. If either is missing, the reference will fail.
 
+## 7. Key Vault Soft Delete and Purge Protection
+
+### The Analogy: The Recycling Bin with a Time Lock
+
+When you delete a file on your computer, it goes to the Recycling Bin. You can recover it before you empty the bin. But what if someone empties the bin immediately? The file is gone forever.
+
+Azure Key Vault's **Soft Delete** is the Recycling Bin. **Purge Protection** is the time lock that prevents anyone from emptying it for a minimum period.
+
+### The Technical Definition
+
+**Soft Delete** is now enabled by default on all new Key Vaults. When you delete a secret or the entire Key Vault, it is NOT immediately destroyed. It enters a "soft-deleted" state and is retained for a configurable period (7–90 days, default 90).
+
+**Purge Protection** goes further: when enabled, nobody (not even subscription owners or Microsoft support) can permanently delete a soft-deleted vault or secret until the retention period expires.
+
+```bash
+# Create a Key Vault with Purge Protection enabled (recommended for production)
+az keyvault create \
+  --name $KV_NAME \
+  --resource-group az204-secrets-rg \
+  --location eastus \
+  --enable-rbac-authorization true \   # ← Modern RBAC (not legacy Access Policies)
+  --retention-days 90 \               # ← Keep soft-deleted items for 90 days
+  --enable-purge-protection true       # ← Nobody can permanently delete during retention period
+```
+
+| Feature | Default | What It Does |
+|---|---|---|
+| **Soft Delete** | ON (cannot disable) | Deleted vaults/secrets go to a recoverable state for 7–90 days |
+| **Purge Protection** | OFF | When ON, permanently prevents deletion before the retention period ends |
+
+🚨 **EXAM ALERT**
+> If you delete a Key Vault that had **Purge Protection enabled**, you **cannot create a new vault with the same name** until the retention period expires and the old vault is automatically purged. This is a common exam trap — and a common real-world surprise. **Always purge the vault explicitly after deleting it in labs** to reclaim the name.
+
+💡 **KEY CONCEPT**
+> Enable Purge Protection on all production Key Vaults. This is a compliance requirement for many regulated industries. It ensures that even a disgruntled administrator cannot permanently destroy your secrets before the retention period ends.
+
+---
+
+## 8. Dynamic Refresh in Azure App Configuration
+
+### The Analogy: The Smart Thermostat
+
+A basic thermostat is set once and stays at that temperature until you physically go and change it. A smart thermostat can receive remote commands in real-time. Your app behaves the same way: a naive implementation reads configuration once at startup. A dynamic implementation polls for changes and updates without restarting.
+
+### The Technical Definition
+
+**Azure App Configuration Dynamic Refresh** allows your application to detect changes to configuration values (including feature flags) and update its in-memory configuration without requiring a restart or redeployment.
+
+**How it works:**
+1. Your app SDK polls the App Configuration service on a configurable interval (default: 30 seconds)
+2. It checks a special **sentinel key** — a single key you designate as the "change signal"
+3. If the sentinel key has changed, the SDK refreshes ALL configuration values in one batch
+4. Your app picks up the new values immediately
+
+**Why use a sentinel key?** Instead of polling every single key for changes (expensive), you update one sentinel key whenever you want the app to refresh. The SDK only needs to check one key to know if anything changed.
+
+```csharp
+// App Configuration Dynamic Refresh in .NET
+builder.Configuration.AddAzureAppConfiguration(options =>
+{
+    options.Connect(connectionString)
+           .ConfigureRefresh(refresh =>
+           {
+               // Watch this ONE sentinel key for changes
+               refresh.Register("App:Sentinel", refreshAll: true)
+                      .SetRefreshInterval(TimeSpan.FromSeconds(30)); // ← Poll every 30 seconds
+           })
+           .UseFeatureFlags(flags =>
+           {
+               flags.SetRefreshInterval(TimeSpan.FromSeconds(30));
+           });
+});
+// Also register the middleware that actually triggers the refresh on each HTTP request
+builder.Services.AddAzureAppConfiguration();
+```
+
+🚨 **EXAM ALERT**
+> Dynamic Refresh requires you to register a **sentinel key** and call `UseAzureAppConfiguration()` middleware (or `IConfigurationRefresher.TryRefreshAsync()` in console apps). Without the middleware, the configuration never actually refreshes even if the SDK is connected.
+
 ---
 
 ## 🔗 MODULE CONNECTIONS
-- **Module 3 (App Service):** Key Vault references rely heavily on the Managed Identity concepts we covered when hosting web apps.
+- **Module 1 (App Service):** The Managed Identity we enable on App Service in M01 is the **exact identity** used to authenticate to Key Vault in this module. The M10 lab continues directly from where M01 finished.
 - **Module 12 (Security & Identity):** We will dive deeper into Azure Active Directory, Managed Identities, and RBAC roles that make Key Vault authentication work.
 
 ---
@@ -154,7 +233,9 @@ When App Service sees this string, it automatically reaches out to Key Vault, gr
 ## What We Covered
 - [x] Why hardcoding secrets is dangerous (The "Keys Under the Doormat" analogy).
 - [x] Azure Key Vault as the centralized solution for Secrets, Keys, and Certificates.
-- [x] The difference between Vault Access Policies (legacy) and Azure RBAC (modern).
+- [x] The difference between Vault Access Policies (legacy) and Azure RBAC (modern, recommended).
 - [x] Azure App Configuration for non-sensitive settings and Feature Flags.
 - [x] How to protect expensive Azure OpenAI keys by storing them in Key Vault.
 - [x] Using Key Vault References in App Service to fetch secrets without writing SDK code.
+- [x] **Soft Delete and Purge Protection:** Disaster recovery for Key Vaults, preventing permanent accidental deletion.
+- [x] **Dynamic Refresh:** How apps pick up App Configuration changes at runtime without restarting.

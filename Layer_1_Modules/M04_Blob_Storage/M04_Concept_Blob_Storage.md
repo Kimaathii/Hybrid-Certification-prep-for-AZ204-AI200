@@ -372,7 +372,120 @@ az storage blob service-properties update \
 
 ---
 
-## Section 9: Redundancy — Protecting Your Data 🟡 MEDIUM EXAM WEIGHT
+## Section 9: Immutability Policies (WORM) 🔴 HIGH EXAM WEIGHT
+
+### The Problem: Compliance Requires Proof That Data Cannot Be Altered
+
+Regulatory frameworks like financial compliance, healthcare (HIPAA), and legal hold requirements do not just ask you to *promise* you won't delete records — they require you to *prove* the data is physically protected from modification or deletion by anyone, including storage administrators.
+
+### The Analogy: Pouring Cement Over a Filing Cabinet
+
+Once the cement sets, nobody can open the cabinet. Not the janitor, not the CEO, not the person who poured the cement. The data inside is permanently preserved exactly as it was when the cement was poured.
+
+**WORM** (Write Once, Read Many) storage achieves this guarantee for blobs.
+
+### Two Types of Immutability Policies
+
+| Policy Type | What It Does | Managed By | Use Case |
+|---|---|---|---|
+| **Time-based Retention** | Prevents modification/deletion until a specific date. After the date passes, data can be deleted normally. | You set the interval | Financial records (7-year regulatory requirement) |
+| **Legal Hold** | Prevents modification/deletion indefinitely until you explicitly release the hold. No time limit. | You add/remove tags | Active litigation — you can't destroy evidence while a case is open |
+
+🚨 **EXAM ALERT**
+> A **Time-based Retention Policy** with **Purge Protection enabled** cannot be shortened or removed before the retention period expires — even by a subscription administrator. Once enabled, even Microsoft cannot delete the data. This is the strongest data protection available in Azure.
+
+### Configuring Immutability via CLI
+
+```bash
+# Apply a time-based immutability policy at the container level
+# Lock blobs in the "compliance-records" container for 7 years (2555 days)
+az storage container immutability-policy create \
+  --account-name $STORAGE_NAME \
+  --container-name compliance-records \
+  --resource-group az204-blob-rg \
+  --period 2555 \
+  --allow-protected-append-writes false
+```
+
+```bash
+# Apply a Legal Hold on a container (indefinite protection)
+az storage container legal-hold set \
+  --account-name $STORAGE_NAME \
+  --container-name legal-evidence \
+  --resource-group az204-blob-rg \
+  --tags "Case2024-001"             # ← Legal hold identifier tag
+```
+
+> 👀 **UI Check:** Portal → Storage Account → **Containers** → click a container → **Access policy** (left menu) → you'll see the Immutability policies section with both **Time-based retention** and **Legal hold** options.
+
+---
+
+## Section 10: Object Replication 🟡 MEDIUM EXAM WEIGHT
+
+### The Problem: What If Your Primary Region Goes Down?
+
+If your Azure region has an outage, blobs stored only in that region are temporarily or permanently inaccessible. Enterprise systems require data copies in geographically separate regions.
+
+### What Object Replication Does
+
+**Object Replication** automatically and asynchronously copies block blobs from a **source container** in one storage account to a **destination container** in another storage account, which can be in a completely different region.
+
+```
+Storage Account A          Object Replication          Storage Account B
+(East US — Primary)  ─────────────────────────────►  (West Europe — DR)
+  └── container: uploads           async copy             └── container: uploads-replica
+       └── photo.jpg  ► ► ► ► ► ► ► ► ► ► ► ► ► ► ► ► ► └── photo.jpg
+```
+
+**Requirements:**
+- Both storage accounts must have **versioning enabled**
+- Both accounts must have **change feed enabled** (the source account)
+- Replication is **asynchronous** — there is a lag between when a blob is uploaded to the source and when it appears in the destination
+
+> 📝 **NOTE:** Object Replication is NOT a backup tool. It is a replication tool. If you accidentally delete a blob in the source, it will eventually be deleted from the destination too. For backup, use **Blob Versioning** or **Blob Snapshots** instead.
+
+---
+
+## Section 11: Blob Index Tags 🟡 MEDIUM EXAM WEIGHT
+
+### The Problem: Searching Millions of Blobs Without a Database
+
+Imagine a storage account with 50 million blobs. You need to find all blobs where `status=pending` and `department=finance`. You cannot download and inspect each one. You need a query mechanism.
+
+### What Blob Index Tags Are
+
+**Blob Index Tags** are key-value pairs attached to a blob that are indexed by Azure Storage, making them queryable using a filtering syntax — without any external database.
+
+```bash
+# Upload a blob and attach index tags
+az storage blob upload \
+  --account-name $STORAGE_NAME \
+  --container-name documents \
+  --name "invoice-2024-001.pdf" \
+  --file invoice.pdf \
+  --tags "status=pending" "department=finance" "year=2024" \
+  --auth-mode login
+
+# Query blobs using index tags across the entire account
+az storage blob list \
+  --account-name $STORAGE_NAME \
+  --container-name documents \
+  --query-tags "status='pending' AND department='finance'" \
+  --auth-mode login
+```
+
+| Blob Metadata | Blob Index Tags |
+|---|---|
+| Stored ON the blob object | Stored in a separate Azure-managed index |
+| Requires listing blobs to query | Queryable directly via filter expression |
+| Read when you fetch blob properties | Searchable across all blobs in a container |
+| No query capability | Supports `=`, `>`, `<`, `AND` operators |
+
+> 🚨 **EXAM ALERT:** Blob Index Tags are queryable. Blob Metadata is NOT queryable. If the exam asks "how do you find all blobs with a specific classification without downloading them" → the answer is **Blob Index Tags**.
+
+---
+
+
 
 Covered in detail in F08, here is the exam-critical summary:
 
@@ -411,12 +524,15 @@ Covered in detail in F08, here is the exam-critical summary:
 - [ ] Archive tier rehydration (1–15 hours) and early deletion penalties
 - [ ] Lifecycle management policies (daily execution, JSON format)
 - [ ] Container public access levels: Private, Blob, Container
-- [ ] RBAC roles for blob storage
+- [ ] RBAC roles for blob storage (Owner, Contributor, Reader)
 - [ ] Three SAS types: Service, Account, User Delegation (most secure)
 - [ ] SDK three-client hierarchy: BlobServiceClient → BlobContainerClient → BlobClient
 - [ ] SDK operations: upload, download, list, delete, metadata
 - [ ] System properties vs user metadata
 - [ ] Static website hosting with `$web` container
+- [ ] **Immutability Policies (WORM):** Time-based Retention vs Legal Hold
+- [ ] **Object Replication:** Asynchronous cross-region blob replication
+- [ ] **Blob Index Tags:** Queryable key-value tags (vs non-queryable metadata)
 - [ ] Redundancy options: LRS, ZRS, GRS, GZRS, RA-GRS
 
 ---
