@@ -8,7 +8,7 @@
 | **Lab Title** | Build, Deploy, Scale, and Secure a .NET Web API on App Service |
 | **Prerequisites** | F01–F05, active Azure subscription, Azure Cloud Shell (Bash) |
 | **Estimated Time** | 120 minutes |
-| **What You Will Build** | A live .NET 8 Minimal API deployed to Azure App Service with deployment slots, autoscale, and a Managed Identity |
+| **What You Will Build** | A live .NET 9 Minimal API deployed to Azure App Service with deployment slots, autoscale, and a Managed Identity |
 | **What You Will Learn** | ✅ Create App Service Plan + Web App · ✅ Build and deploy a real .NET API · ✅ Configure app settings · ✅ Use deployment slots · ✅ Swap and rollback · ✅ Autoscale rules · ✅ Enable Managed Identity |
 | **Tool** | Azure Cloud Shell (Bash) — everything runs in the browser, nothing to install |
 
@@ -16,7 +16,7 @@
 
 > ⚠️ **IMPORTANT: Use Azure Cloud Shell for the entire lab.**
 > Open [portal.azure.com](https://portal.azure.com) → Click the `>_` icon in the top toolbar → Select **Bash**.
-> Cloud Shell has .NET 8 SDK, Azure CLI, and `curl` pre-installed. You do not need to install anything on your local machine.
+> Cloud Shell has .NET 9 SDK, Azure CLI, and `curl` pre-installed. You do not need to install anything on your local machine.
 
 ---
 
@@ -80,7 +80,7 @@ az webapp create \
   --name $APP_NAME \                  # ← Globally unique app name
   --resource-group az204-appservice-rg \
   --plan az204-appservice-plan \      # ← The S1 plan from Step 2
-  --runtime "DOTNETCORE|8.0"         # ← .NET 8 runtime (Linux uses | separator)
+  --runtime "DOTNETCORE|9.0"         # ← .NET 9 runtime (Linux uses | separator)
 ```
 
 **Expected output:** A JSON object with `"state": "Running"`.
@@ -97,18 +97,18 @@ az webapp create \
 
 ---
 
-## Part 2: Build and Deploy a Real .NET 8 Web API
+## Part 2: Build and Deploy a Real .NET 9 Web API
 
 **Why this approach matters:** In real enterprise work, you never pull code from someone else's GitHub. You build your own code and deploy it. This section teaches the exact pattern used in CI/CD pipelines.
 
-### Step 4: Create a .NET 8 Minimal Web API in Cloud Shell
+### Step 4: Create a .NET 9 Minimal Web API in Cloud Shell
 
 ```bash
 # Create a project directory
 mkdir ~/az204-api && cd ~/az204-api
 
-# Create a new .NET 8 Minimal API project
-dotnet new web --name AlphaApi --framework net8.0
+# Create a new .NET 9 Minimal API project
+dotnet new web --name AlphaApi --framework net9.0
 cd AlphaApi
 ```
 
@@ -197,7 +197,7 @@ az webapp deployment source config-zip \
 | `--name` | The target App Service name |
 | `--src` | Path to the ZIP file to deploy |
 
-This takes **1–2 minutes**. Azure unpacks the ZIP, configures the .NET 8 runtime, and starts the app.
+This takes **1–2 minutes**. Azure unpacks the ZIP, configures the .NET 9 runtime, and starts the app.
 
 ### Step 8: Verify the Live API
 
@@ -636,7 +636,7 @@ az group list --output table
 
 - [x] Resource group with project tags
 - [x] S1 Linux App Service Plan (Standard tier)
-- [x] .NET 8 Minimal Web API created in Cloud Shell (no local install)
+- [x] .NET 9 Minimal Web API created in Cloud Shell (no local install)
 - [x] API deployed via ZIP Deploy (the enterprise CLI pattern)
 - [x] App Settings configured and verified as live environment variables
 - [x] Staging deployment slot created

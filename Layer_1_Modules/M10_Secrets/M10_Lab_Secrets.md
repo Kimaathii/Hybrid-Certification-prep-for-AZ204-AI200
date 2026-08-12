@@ -55,7 +55,7 @@ az webapp create \
   --name $APP_NAME \
   --resource-group az204-appservice-rg \
   --plan az204-appservice-plan \
-  --runtime "DOTNETCORE|8.0"
+  --runtime "DOTNETCORE|9.0"
 
 # Enable Managed Identity immediately
 az webapp identity assign \
